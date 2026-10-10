@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+!DOOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -132,7 +132,7 @@
                 total += lineTotal;
             });
 
-            invoice += `\nجمع کل: ${total}`;
+            invoice += `\nجمع: ${total}`;
             document.getElementById('output').innerText = invoice;
         }
 
