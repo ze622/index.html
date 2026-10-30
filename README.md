@@ -156,6 +156,32 @@ function normalizeName(name) {
         .toLowerCase();
 }
 
+let pendingPriceUpdates = [];
+
+function normalizeDigits(text) {
+    return String(text)
+        .replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+        .replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+}
+
+function productSimilarity(a, b) {
+    a = normalizeName(a);
+    b = normalizeName(b);
+
+    if (a === b) return 1;
+
+    if (a.includes(b) || b.includes(a)) {
+        return Math.min(a.length, b.length) / Math.max(a.length, b.length) + 0.3;
+    }
+
+    const wordsA = new Set(a.split(/\s+/));
+    const wordsB = new Set(b.split(/\s+/));
+
+    const common = [...wordsA].filter(w => wordsB.has(w)).length;
+
+    return common / Math.max(wordsA.size, wordsB.size);
+}
+
 function updatePrices() {
     const input = document.getElementById("updatePriceInput").value;
     const report = document.getElementById("updateReport");
@@ -164,16 +190,24 @@ function updatePrices() {
     let notFound = [];
     let invalid = [];
     let duplicates = [];
+    let unchanged = [];
+
+    pendingPriceUpdates = [];
 
     const seen = new Set();
+    const keys = Object.keys(masterDatabase);
 
     input.split("\n").forEach(line => {
         line = line.trim();
         if (!line) return;
 
-        const parts = line.split(/\s+/);
-        const priceText = parts.pop().replace(/,/g, "");
+        let parts = normalizeDigits(line).split(/\s+/);
 
+        if (parts[parts.length - 1] === "تومان") {
+            parts.pop();
+        }
+
+        const priceText = parts.pop().replace(/[٬,،]/g, "");
         const price = Number(priceText);
         const name = parts.join(" ").trim();
 
@@ -181,6 +215,234 @@ function updatePrices() {
             invalid.push(line);
             return;
         }
+
+        const normalized = normalizeName(name);
+
+        if (seen.has(normalized)) {
+            duplicates.push(name);
+            return;
+        }
+
+        seen.add(normalized);
+
+        // ابتدا جستجوی نام دقیق
+        const exactKey = keys.find(
+            key => normalizeName(key) === normalized
+        );
+
+        if (exactKey) {
+            const oldPrice = Number(masterDatabase[exactKey]);
+
+            if (oldPrice === price) {
+                unchanged.push(exactKey);
+                return;
+            }
+
+            masterDatabase[exactKey] = price;
+
+            updated.push({
+                name: exactKey,
+                oldPrice,
+                newPrice: price
+            });
+
+            return;
+        }
+
+        // جستجوی محصولات مشابه
+        const candidates = keys
+            .map(key => ({
+                name: key,
+                score: productSimilarity(name, key)
+            }))
+            .filter(item => item.score >= 0.5)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 5);
+
+        if (candidates.length) {
+            pendingPriceUpdates.push({
+                inputName: name,
+                price,
+                candidates
+            });
+        } else {
+            notFound.push(name);
+        }
+    });
+
+    if (updated.length) {
+        savePriceDatabase();
+    }
+
+    renderUpdateReport({
+        updated,
+        notFound,
+        invalid,
+        duplicates,
+        unchanged
+    });
+}
+
+
+// نمایش گزارش و انتخاب محصول مشابه
+function renderUpdateReport(data) {
+    const report = document.getElementById("updateReport");
+    report.innerHTML = "";
+
+    const title = document.createElement("h4");
+    title.textContent = "گزارش به‌روزرسانی قیمت‌ها";
+    report.appendChild(title);
+
+    function addLine(text) {
+        const p = document.createElement("p");
+        p.textContent = text;
+        report.appendChild(p);
+    }
+
+    addLine("✅ قیمت‌های دقیقاً منطبق: " + data.updated.length);
+    addLine("🔍 محصولات نیازمند تأیید: " + pendingPriceUpdates.length);
+    addLine("➖ بدون تغییر: " + data.unchanged.length);
+    addLine("❌ پیدا نشده: " + data.notFound.length);
+    addLine("⚠️ خطوط نامعتبر: " + data.invalid.length);
+    addLine("🔁 موارد تکراری: " + data.duplicates.length);
+
+    if (data.updated.length) {
+        const heading = document.createElement("h4");
+        heading.textContent = "تغییرات انجام‌شده:";
+        report.appendChild(heading);
+
+        data.updated.forEach(item => {
+            addLine(
+                "✅ " + item.name +
+                " | قبلی: " + item.oldPrice.toLocaleString("fa-IR") +
+                " | جدید: " + item.newPrice.toLocaleString("fa-IR")
+            );
+        });
+    }
+
+    if (pendingPriceUpdates.length) {
+        const heading = document.createElement("h4");
+        heading.textContent = "انتخاب محصولات مشابه:";
+        report.appendChild(heading);
+
+        pendingPriceUpdates.forEach((item, index) => {
+            const box = document.createElement("div");
+            box.style.cssText =
+                "background:#fff;padding:10px;margin:10px 0;border:1px solid #e0a000;border-radius:8px;";
+
+            const name = document.createElement("p");
+            name.textContent =
+                "نام واردشده: " + item.inputName +
+                " | قیمت جدید: " + item.price.toLocaleString("fa-IR");
+
+            const select = document.createElement("select");
+            select.dataset.index = index;
+            select.style.cssText =
+                "width:100%;padding:10px;margin:5px 0;";
+
+            const first = document.createElement("option");
+            first.value = "";
+            first.textContent = "محصول صحیح را انتخاب کن...";
+            select.appendChild(first);
+
+            item.candidates.forEach(candidate => {
+                const option = document.createElement("option");
+                option.value = candidate.name;
+                option.textContent =
+                    candidate.name +
+                    " (قیمت فعلی: " +
+                    Number(masterDatabase[candidate.name]).toLocaleString("fa-IR") +
+                    ")";
+                select.appendChild(option);
+            });
+
+            box.append(name, select);
+            report.appendChild(box);
+        });
+
+        const applyButton = document.createElement("button");
+        applyButton.textContent = "تأیید انتخاب‌ها و اعمال قیمت‌ها";
+        applyButton.style.background = "#198754";
+        applyButton.onclick = applySimilarPrices;
+        report.appendChild(applyButton);
+    }
+
+    if (data.notFound.length) {
+        addLine("محصولات پیدا نشده: " + data.notFound.join("، "));
+    }
+
+    if (data.invalid.length) {
+        addLine("خطوط نامعتبر: " + data.invalid.join("، "));
+    }
+
+    if (data.duplicates.length) {
+        addLine("موارد تکراری: " + data.duplicates.join("، "));
+    }
+}
+
+
+// اعمال قیمت فقط برای محصولاتی که تأیید شده‌اند
+function applySimilarPrices() {
+    const report = document.getElementById("updateReport");
+    const selects = report.querySelectorAll("select[data-index]");
+
+    let count = 0;
+    let details = [];
+
+    selects.forEach(select => {
+        const index = Number(select.dataset.index);
+        const item = pendingPriceUpdates[index];
+        const selectedName = select.value;
+
+        if (!selectedName || !item) return;
+
+        const oldPrice = Number(masterDatabase[selectedName]);
+
+        if (oldPrice === item.price) {
+            details.push("➖ " + selectedName + ": قیمت تغییر نکرد.");
+            count++;
+            return;
+        }
+
+        masterDatabase[selectedName] = item.price;
+
+        details.push(
+            "✅ " + selectedName +
+            " | قبلی: " + oldPrice.toLocaleString("fa-IR") +
+            " | جدید: " + item.price.toLocaleString("fa-IR")
+        );
+
+        count++;
+    });
+
+    if (count > 0) {
+        savePriceDatabase();
+    }
+
+    pendingPriceUpdates = [];
+
+    report.innerHTML = "";
+
+    const title = document.createElement("h4");
+    title.textContent = "نتیجه تأیید محصولات مشابه";
+    report.appendChild(title);
+
+    const result = document.createElement("p");
+    result.textContent = "تعداد موارد تأییدشده: " + count;
+    report.appendChild(result);
+
+    details.forEach(detail => {
+        const p = document.createElement("p");
+        p.textContent = detail;
+        report.appendChild(p);
+    });
+
+    if (count === 0) {
+        const p = document.createElement("p");
+        p.textContent = "هیچ محصولی برای اعمال انتخاب نشده است.";
+        report.appendChild(p);
+    }
+}
 
         const normalized = normalizeName(name);
 
